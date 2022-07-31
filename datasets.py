@@ -10,6 +10,8 @@ import utils
 from mpl_toolkits.mplot3d import Axes3D 
 import matplotlib.pyplot as plt
 
+import sys
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class DeepVoxels():
@@ -74,7 +76,6 @@ class DeepVoxels():
         # dataset "pose" files are matrix transformation that transform camera coord to world coord
         extrinsic_inv = np.genfromtxt(self.pose_fpaths[idx])
         extrinsic_inv = extrinsic_inv.reshape(4, 4)
-        R_inv = extrinsic_inv[:3, :3]
         T_inv = extrinsic_inv[:3, 3]
 
         cam_pos = T_inv
@@ -96,6 +97,15 @@ class DeepVoxels():
         
         return o_ndc, d_ndc, gt
     
+    def __getitem__(self, i):
+        idx = i // (self.H * self.W)
+        s = i - idx * (self.H * self.W)
+        y = s // (self.W)
+        s = s - y * (self.W)
+        x = s
+        o, d, gt = self.get_rays(idx, x, y)
+        return {"o": o, "d": d}, gt
+"""    
     def cam_render(self):
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
@@ -146,3 +156,4 @@ class DataLoader():
     
     def __len__(self):
         return len(self.dataset) // self.batch_size
+"""
