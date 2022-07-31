@@ -20,8 +20,8 @@ def train():
     fine_num = 128
     learning_rate = 5 * 1e-4
     weight_decay = 5 * 1e-5
-    max_iter = 300000
-    val_iter = max_iter // 10
+    max_iter = 100000
+    val_iter = 100
 
     # dataset
     dataset = datasets.DeepVoxels()
@@ -38,13 +38,14 @@ def train():
     losses = []
 
     # iteration
-    for iter in tqdm.tqdm(range(max_iter)):
+    iter = 0
+    pbar = tqdm.tqdm(total=max_iter)
+    while iter < max_iter:
         # batch rays from loader
-        for idx, sample in tqdm.tqdm(enumerate(dataloader)):
+        for idx, sample in enumerate(dataloader):
             o_batch = sample[0]["o"]
             d_batch = sample[0]["d"]
             gt_batch = sample[1]
-            print("get batch")
 
             # coarse sampling: because of ndc, we can sampling t from 0 to 1
             x_batch = []
@@ -129,11 +130,17 @@ def train():
             optimizer.step()
             losses.append(loss.item())
 
-        if iter % val_iter == 0:
-            torch.save(model, 'params.pt')
-        # validate model per some iterations
-        pass
+            iter += 1
+            pbar.update(1)
+            if iter >= max_iter:
+                break
 
+            if iter % val_iter == 0:
+                torch.save(model, 'params.pt')
+                # validate model per some iterations
+                pass
+
+    pbar.close()
     plt.plot(losses)
     plt.savefig('loss_graph.png')
     plt.show()

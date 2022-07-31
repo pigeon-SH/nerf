@@ -35,7 +35,7 @@ def volume_rendering(x, sigma, rgb):
     cs = torch.cumsum(delta * sigma, dim=0)
     T = torch.exp(-cs)
     weights = T * (1 - torch.exp(-delta * sigma))
-    C = torch.sum(weights * rgb)
+    C = torch.sum(weights * rgb, dim=0)
     return C, weights
 
 
