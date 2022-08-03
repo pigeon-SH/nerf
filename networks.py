@@ -20,9 +20,11 @@ class Network(nn.Module):
         self.add_fc2 = nn.Linear(128, 3)    # rgb output
     
     def forward(self, x, d):
-        """ x: result of positional encoding of location, shape=(batch_size, 60)
-            d: result of positional encoding of viewing direction, shape=(batch_size, 24)
+        """ x: result of positional encoding of location, shape=(batch_size, sample_num, 60)
+            d: result of positional encoding of viewing direction, shape=(batch_size, sample_num, 24)
         """
+        x = torch.flatten(x, 0, 1)
+        d = torch.flatten(d, 0, 1)
         v = self.fc1(x)
         v = F.relu(v)
         v = self.fc2(v)
@@ -40,14 +42,14 @@ class Network(nn.Module):
         v = F.relu(v)
         v = self.fc8(v)
         # add noise
-        sigma = v[:, 0]
-        noise = torch.tensor(np.random.normal(loc=0, scale=1, size=sigma.shape)).to(device=device, dtype=torch.float32)
-        sigma = sigma + noise
-        sigma = F.relu(sigma)
-        v = v[:, 1:]    # no activation
+        sigma = v[:, 0].clone()
+        v = v[:, 1:].clone()    # no activation
         v = torch.cat([v, d], dim=1)
         v = self.add_fc1(v)
         v = F.relu(v)
         v = self.add_fc2(v)
         rgb = torch.sigmoid(v)
+        noise = torch.tensor(np.random.normal(loc=0, scale=1, size=sigma.shape)).to(device=device, dtype=torch.float32)
+        sigma = sigma + noise
+        sigma = F.relu(sigma)
         return sigma, rgb

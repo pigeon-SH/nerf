@@ -25,17 +25,17 @@ def positional_encoding(x, L=10):
 def dist(x1, x2):
     return torch.linalg.norm(x1 - x2, 2)
 
-def volume_rendering(x, sigma, rgb):
-    """ x shape: (coarse_num, 3)
-        sigma shape: (coarse_num, 1)
-        rgb shape: (coarse_num, 3)
+def volume_rendering(t, sigma, rgb):
+    """ t shape: (batch_size, coarse_num, 1)
+        sigma shape: (batch_size, coarse_num, 1)
+        rgb shape: (batch_size, coarse_num, 3)
     """
-    delta = torch.sqrt(torch.sum(torch.square(x[1:, :] - x[:-1, :]), dim=1, keepdim=True))    # shape: (coarse_num - 1, 1)
-    delta = torch.cat([delta, torch.zeros_like(delta[0:1, :])], dim=0)    # shape: (coarse_num, 1) there is no distance for last element
-    cs = torch.cumsum(delta * sigma, dim=0)
+    delta = t[:, 1:, :] - t[:, :-1, :]  # shape: (batch_size, coarse_num-1, 1)
+    delta = torch.cat([delta, 1e10 * torch.ones_like(delta[:, 0:1, :])], dim=1)    # shape: (batch_size, coarse_num, 1), inf for last distance
+    cs = torch.cumsum(delta * sigma, dim=1) # shape: (batch_size, coarse_num, 1)
     T = torch.exp(-cs)
-    weights = T * (1 - torch.exp(-delta * sigma))
-    C = torch.sum(weights * rgb, dim=0)
+    weights = T * (1. - torch.exp(-delta * sigma))  # shape: (batch_size, coarse_num, 1)
+    C = torch.sum(weights.clone() * rgb.clone(), dim=1) # shape: (batch_size, 1)
     return C, weights
 
 
