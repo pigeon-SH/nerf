@@ -42,14 +42,14 @@ class Network(nn.Module):
         v = F.relu(v)
         v = self.fc8(v)
         # add noise
-        sigma = v[:, 0].clone()
-        v = v[:, 1:].clone()    # no activation
+        sigma = v[:, 0]
+        v = v[:, 1:]    # no activation
         v = torch.cat([v, d], dim=1)
         v = self.add_fc1(v)
         v = F.relu(v)
         v = self.add_fc2(v)
         rgb = torch.sigmoid(v)
-        noise = torch.tensor(np.random.normal(loc=0, scale=1, size=sigma.shape)).to(device=device, dtype=torch.float32)
+        noise = torch.tensor(np.random.normal(loc=0, scale=1, size=sigma.shape)).to(device=device, dtype=torch.float32) / 100
         sigma = sigma + noise
         sigma = F.relu(sigma)
         return sigma, rgb

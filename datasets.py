@@ -12,11 +12,14 @@ import matplotlib.pyplot as plt
 
 import sys
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 class DeepVoxels():
-    def __init__(self, is_ndc):
-        self.root = "../datasets/DeepVoxels/synthetic_scenes/train/armchair"
+    def __init__(self, is_train, is_ndc):
+        if is_train:
+            self.root = "../datasets/DeepVoxels/synthetic_scenes/train/armchair"
+        else:
+            self.root = "../datasets/DeepVoxels/synthetic_scenes/validation/armchair"
         self.is_ndc = is_ndc
 
         self.pose_fpaths = sorted(glob(os.path.join(self.root, "pose/*.txt")))
@@ -53,7 +56,7 @@ class DeepVoxels():
             extrinsic_inv = np.genfromtxt(self.pose_fpaths[idx])
             extrinsic_inv = torch.tensor(extrinsic_inv.reshape(4, 4), device=device, dtype=torch.float32)
             img = cv2.imread(self.img_fpaths[idx])  # shape: (H, W, 3)
-            gt = torch.tensor(img, device=device).permute((1, 0, 2))    # shape: (W, H, 3)
+            gt = torch.tensor(img, device=device).permute((1, 0, 2)) / 255.    # shape: (W, H, 3)
             self.gt_s.append(gt)
 
             T_inv = extrinsic_inv[:3, 3]
@@ -70,23 +73,6 @@ class DeepVoxels():
             theta, phi = self.to_polar(d_world[:, :, :3])
             d = torch.stack([theta, phi, torch.ones_like(theta)], dim=-1)   # shape: (W, H ,3)
             self.d_s.append(d)
-
-
-
-        """
-        for pixel_x in range(self.W):
-            for pixel_y in range(self.H):
-                pixel = np.array([pixel_x, pixel_y, 1]) # [u, v]
-                d_cam = np.matmul(self.K_inv, pixel.T) # pixel's camera coord = pixel's cam direction since cam is at origin of cam coord
-                d_cam = np.append(d_cam, 1)
-                d_world = np.matmul(extrinsic_inv, d_cam)
-                theta, phi, _ = self.to_polar(d_world[:3])
-                d = np.array([theta, phi, 1])
-                self.d_s.append(d)
-                
-                gt = torch.tensor(img[pixel_y, pixel_x], device=device)
-                self.gt_s.append(gt)
-        """
                         
         self.o_s = torch.stack(self.o_s, dim=0) # shape: (img_num, 3)
         self.d_s = torch.stack(self.d_s, dim=0).view((self.img_num, self.W, self.H, 3)) # shape: (img_num, W, H, 3)
@@ -102,16 +88,8 @@ class DeepVoxels():
         y = xyz[:, :, 1]
         z = xyz[:, :, 2]
         theta = torch.arctan(y / x)
-        phi = torch.arctan(z / y)
+        phi = torch.arctan(z / torch.sqrt(torch.square(x) + torch.square(y)))
         return theta, phi   # shape: (W, H)
-    """
-    def to_polar(self, xyz):
-        x, y, z = xyz
-        theta = np.arctan(y / x)
-        phi = np.arctan(z / y)
-        r = np.linalg.norm(xyz, 2)
-        return theta, phi, r
-    """
 
     def to_ndc(self, o, d):
         o_prime = np.zeros(o.size)
@@ -130,120 +108,40 @@ class DeepVoxels():
         idx = torch.randint(0, self.img_num, (batch_size,))
         x = torch.randint(0, self.W, (batch_size,))
         y = torch.randint(0, self.H, (batch_size,))
-        o = self.o_s[idx, :]
-        d = self.d_s[idx, x, y, :]
-        gt = self.gt_s[idx, x, y, :]
+        o = self.o_s[idx, :]    # shape: (batch_size, 3)
+        d = self.d_s[idx, x, y, :]  # shape: (batch_size, 3)
+        gt = self.gt_s[idx, x, y, :]    # shape: (batch_size, 3)
         
         return [{"o": o, "d": d}, gt]
     
-    """
-    def get_rays(self, idx, pixel_x, pixel_y):        
-        #return (camera pose o, viewing direction d, ground truth gt)
+    def get_rays_test(self):
+        idx = torch.zeros((self.W * self.H,), dtype=torch.long)
+        x = torch.repeat_interleave(torch.arange(0, self.W).view((self.W, 1)), repeats=self.H, dim=1)
+        y = torch.repeat_interleave(torch.arange(0, self.H).view((1, self.H)), repeats=self.W, dim=0)
+        x = torch.flatten(x)
+        y = torch.flatten(y)
+        o = self.o_s[idx, :]    # shape: (batch_size, 3)
+        d = self.d_s[idx, x, y, :]  # shape: (batch_size, 3)
+        gt = self.gt_s[idx, x, y, :]    # shape: (batch_size, 3)
         
-        # https://github.com/vsitzmann/deepvoxels 
-        # dataset "pose" files are matrix transformation that transform camera coord to world coord
-        extrinsic_inv = np.genfromtxt(self.pose_fpaths[idx])
-        extrinsic_inv = extrinsic_inv.reshape(4, 4)
-        T_inv = extrinsic_inv[:3, 3]
-
-        o = T_inv
-
-        # get world coordinate vector of a pixel v1
-        pixel = np.array([pixel_x, pixel_y, 1]) # [u, v]
-        d_cam = np.matmul(self.K_inv, pixel.T) # pixel's camera coord = pixel's cam direction since cam is at origin of cam coord
-        d_cam = np.append(d_cam, 1)
-        d_world = np.matmul(extrinsic_inv, d_cam)
-        theta, phi, _ = self.to_polar(d_world[:3])
-        d = np.array([theta, phi, 1])
-        
-        img = cv2.imread(self.img_fpaths[idx])
-        gt = torch.tensor(img[pixel_y, pixel_x], device=device)
-
-        if self.is_ndc:
-            o, d = self.to_ndc(o, d)
-            
-        o = torch.tensor(o, device=device, dtype=torch.float32)
-        d = torch.tensor(d, device=device, dtype=torch.float32)
-        
-        return o, d, gt
-    """
+        return [{"o": o, "d": d}, gt]
     
-    def __getitem__(self, i):
-        idx = i // (self.H * self.W)
-        s = i - idx * (self.H * self.W)
-        y = s // (self.W)
-        s = s - y * (self.W)
-        x = s
-        o, d, gt = self.get_rays(idx, x, y)
-        return {"o": o, "d": d}, gt
-    
-    def get_batch(self, batch_size):
-        o_batch = []
-        d_batch = []
-        gt_batch = []
-        for i in range(batch_size):
-            idx = random.randrange(0, self.img_num)
-            y = random.randrange(0, self.H)
-            x = random.randrange(0, self.W)
-            o, d, gt = self.get_rays(idx, x, y)
-            o_batch.append(o)
-            d_batch.append(d)
-            gt_batch.append(gt)
-        o_batch = torch.stack(o_batch, dim=0)
-        d_batch = torch.stack(d_batch, dim=0)
-        gt_batch = torch.stack(gt_batch, dim=0)
-        return [{"o": o_batch, "d": d_batch}, gt_batch]
+    def get_rays_val(self, idx, batch_size):
+        d_f = torch.flatten(self.d_s[idx], 0, 1)    # shape: (W*H, 3)
+        i = 0
+        d_batchs = []
+        while (i+1)*batch_size < self.W * self.H:
+            start = i * batch_size
+            end = (i+1) * batch_size 
+            d = d_f[start:end, :]
+            d_batchs.append(d)
+            i += 1
+        d = d_f[start:end, :]
+        d_batchs.append(d)
+        d_batchs = torch.stack(d_batchs, 0) # shape: (num, batch_size, 3) where (num*batch_size)=W*H
 
+        o_batch = self.o_s[idx:idx+1]   # shape: (1, 3)
+        o_batch = torch.repeat_interleave(o_batch.view((1, 1, 3)), batch_size, dim=1)   # shape: (1, batch_size, 3)
+        o_batchs = torch.repeat_interleave(o_batch, len(d_batchs), dim=0) # shape: (num, batch_size, 3) where (num*batch_size)=W*H
+        return o_batchs, d_batchs
 
-"""    
-    def cam_render(self):
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        for i in range(100):
-            extrinsic = np.genfromtxt(self.pose_fpaths[i])
-            extrinsic = extrinsic.reshape(4, 4)
-            
-            R = extrinsic[:3, :3]
-            T = extrinsic[:3, 3]
-            cam_pos = -np.matmul(R, T)
-            ax.scatter(*cam_pos)
-        
-        plt.show()
-
-        
-    def get_batch(self, samples):
-        # randomly choose 4096 values from range(total_img * H * W)
-        o_batch = []
-        d_batch = []
-        gt_batch = []
-        for sample in samples:
-            # sample = idx * (self.H*self.W) + y * (self.W) + x
-            idx = sample // (self.H * self.W)
-            s = sample - idx * (self.H * self.W)
-            y = s // (self.W)
-            s = s - y * (self.W)
-            x = s
-            o, d, gt = self.get_rays(idx, x, y)
-            o_batch.append(o)
-            d_batch.append(d)
-            gt_batch.append(gt)
-        o_batch = torch.stack(o_batch, dim=0)
-        d_batch = torch.stack(d_batch, dim=0)
-        gt_batch = torch.stack(gt_batch, dim=0)
-        return o_batch, d_batch, gt_batch
-
-class DataLoader():
-    def __init__(self, dataset, batch_size=4096, shuffle=True):
-        self.dataset = dataset
-        self.batch_size = batch_size
-        self.samples = list(range(len(dataset)))
-        if shuffle:
-            random.shuffle(self.samples)
-            
-    
-    def get_batch(self, idx):
-        return self.dataset.get_batch(self.samples[idx*self.batch_size : (idx+1)*self.batch_size])
-    
-    def __len__(self):
-        return len(self.dataset) // self.batch_size
-"""
