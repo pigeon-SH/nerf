@@ -65,21 +65,21 @@ class DeepVoxels():
         
             xs = torch.arange(0, self.W).to(device=device, dtype=torch.float32)
             ys = torch.arange(0, self.H).to(device=device, dtype=torch.float32)
-            ys, xs = torch.meshgrid(ys, xs)   # default indexing='ij' for pytorch version 1.7
-            pixels = torch.stack([xs, ys, torch.ones_like(xs)], dim=-1).view((self.W, self.H, 3, 1))    # shape: (W, H, 3)
+            xs, ys = torch.meshgrid(ys, xs)   # default indexing='ij' for pytorch version 1.7
+            pixels = torch.stack([xs, ys, torch.ones_like(xs)], dim=-1).view((self.W, self.H, 3, 1))    # shape: (W, H, 3, 1)
             d_cam = torch.matmul(self.K_inv, pixels)    # shape: (W, H, 3, 1)
-            d_cam = torch.cat([d_cam, torch.ones_like(d_cam[:, :, 0:1])], dim=2) # shape: (W, H, 4, 1)
-            d_world = torch.matmul(extrinsic_inv, d_cam).view((self.W, self.H, 4))[:, :, :3]  # shape: (W, H, 3)
-            theta, phi = self.to_polar(d_world[:, :, :3])
-            d = torch.stack([theta, phi, torch.ones_like(theta)], dim=-1)   # shape: (W, H ,3)
-            self.d_s.append(d)
+            d_cam = torch.cat([d_cam[:, :, 0:1], -d_cam[:, :, 1:2], -torch.ones_like(d_cam[:, :, 0:1])], dim=2) # shape: (W, H, 3, 1)
+            d_world = torch.matmul(extrinsic_inv[:3, :3], d_cam).view((self.W, self.H, 3))  # shape: (W, H, 3)
+            self.d_s.append(d_world)
                         
         self.o_s = torch.stack(self.o_s, dim=0) # shape: (img_num, 3)
         self.d_s = torch.stack(self.d_s, dim=0).view((self.img_num, self.W, self.H, 3)) # shape: (img_num, W, H, 3)
         self.gt_s = torch.stack(self.gt_s, dim=0).view((self.img_num, self.W, self.H, 3))   # shape: (img_num, W, H, 3)
 
+        self.d_s = self.d_s / torch.norm(self.d_s, p=2, dim=-1, keepdim=True)
+
     def __len__(self):
-        return self.img_num * self.H * self.W
+        return self.img_num
 
     def to_polar(self, xyz):
         """xyz shape: (W, H, 3)
@@ -103,28 +103,6 @@ class DeepVoxels():
         d_prime[2] = -2 * self.n / o[2]
 
         return o_prime, d_prime
-
-    def get_rays(self, batch_size):
-        idx = torch.randint(0, self.img_num, (batch_size,))
-        x = torch.randint(0, self.W, (batch_size,))
-        y = torch.randint(0, self.H, (batch_size,))
-        o = self.o_s[idx, :]    # shape: (batch_size, 3)
-        d = self.d_s[idx, x, y, :]  # shape: (batch_size, 3)
-        gt = self.gt_s[idx, x, y, :]    # shape: (batch_size, 3)
-        
-        return [{"o": o, "d": d}, gt]
-    
-    def get_rays_test(self):
-        idx = torch.zeros((self.W * self.H,), dtype=torch.long)
-        x = torch.repeat_interleave(torch.arange(0, self.W).view((self.W, 1)), repeats=self.H, dim=1)
-        y = torch.repeat_interleave(torch.arange(0, self.H).view((1, self.H)), repeats=self.W, dim=0)
-        x = torch.flatten(x)
-        y = torch.flatten(y)
-        o = self.o_s[idx, :]    # shape: (batch_size, 3)
-        d = self.d_s[idx, x, y, :]  # shape: (batch_size, 3)
-        gt = self.gt_s[idx, x, y, :]    # shape: (batch_size, 3)
-        
-        return [{"o": o, "d": d}, gt]
     
     def get_rays_val(self, idx, batch_size):
         d_f = torch.flatten(self.d_s[idx], 0, 1)    # shape: (W*H, 3)
@@ -143,5 +121,19 @@ class DeepVoxels():
         o_batch = self.o_s[idx:idx+1]   # shape: (1, 3)
         o_batch = torch.repeat_interleave(o_batch.view((1, 1, 3)), batch_size, dim=1)   # shape: (1, batch_size, 3)
         o_batchs = torch.repeat_interleave(o_batch, len(d_batchs), dim=0) # shape: (num, batch_size, 3) where (num*batch_size)=W*H
+
         return o_batchs, d_batchs
+    
+    def get_ray_batchs(self, idx, batch_size):
+        o_batch = self.o_s[idx:idx+1]   # shape: (1, 3)
+        o_batch = torch.repeat_interleave(o_batch, batch_size, dim=0)   # shape: (batch_size, 3)
+        pixel_idxs = torch.randint(0, self.W * self.H, (batch_size,))
+        d_f = torch.flatten(self.d_s[idx], 0, 1)    # shape: (W*H, 3)
+        d_batch = d_f[pixel_idxs, :]
+        gt_f = torch.flatten(self.gt_s[idx], 0, 1)    # shape: (W*H, 3)
+        gt_batch = gt_f[pixel_idxs, :]
+        return o_batch, d_batch, gt_batch
+
+
+
 

@@ -4,3 +4,5 @@
 *.pt
 test*
 val*
+__pycache__*
+.vscode*

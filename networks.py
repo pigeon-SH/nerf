@@ -49,7 +49,7 @@ class Network(nn.Module):
         v = F.relu(v)
         v = self.add_fc2(v)
         rgb = torch.sigmoid(v)
-        noise = torch.tensor(np.random.normal(loc=0, scale=1, size=sigma.shape)).to(device=device, dtype=torch.float32) / 100
+        noise = torch.tensor(np.random.normal(loc=0, scale=1, size=sigma.shape)).to(device=device, dtype=torch.float32)
         sigma = sigma + noise
         sigma = F.relu(sigma)
         return sigma, rgb

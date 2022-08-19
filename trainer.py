@@ -1,3 +1,8 @@
+"""
+220818 problem
+아마 validate 결과 이미지 값이 0~1로 기대되는데 -값을 가지는 것 같음 아니면 1 초과던가
+"""
+
 import os
 import torch
 import random
@@ -24,6 +29,7 @@ def render(net_coarse, net_fine, o_batch, d_batch, batch_size):
     far = 1.
     coarse_num = 64
     fine_num = 128
+    sample_num = coarse_num + fine_num
 
     # coarse sampling
     low = torch.linspace(near, far, coarse_num + 1, device=device, dtype=torch.float32)[:-1]
@@ -72,24 +78,24 @@ def render(net_coarse, net_fine, o_batch, d_batch, batch_size):
     t_fine = y0 * (x1 - uniform_samples) + y1 * (uniform_samples - x0) / (x1 - x0)  # shape: (batch_size, fine_num)
     t_fine = t_fine.view((batch_size, fine_num, 1))
 
-    o_fine = torch.repeat_interleave(o_batch.view((batch_size, 1, 3)), repeats=fine_num, dim=1)    # shape: (batch_size, fine_num, 3)
-    d_fine = torch.repeat_interleave(d_batch.view((batch_size, 1, 3)), repeats=fine_num, dim=1)    # shape: (batch_size, fine_num, 3)
+    # concat t_coarse and t_fine
+    t_fine = torch.cat([t_coarse, t_fine], dim=1)   # shape: (batch_size, sample_num, 1)
+    t_fine = t_fine.sort(dim=1)[0]
+
+    o_fine = torch.repeat_interleave(o_batch.view((batch_size, 1, 3)), repeats=sample_num, dim=1)    # shape: (batch_size, sample_num, 3)
+    d_fine = torch.repeat_interleave(d_batch.view((batch_size, 1, 3)), repeats=sample_num, dim=1)    # shape: (batch_size, sample_num, 3)
     x_fine = o_fine + t_fine * d_fine
 
     # positional encoding for each fine samples
-    x_pe_fine = utils.positional_encoding(x_fine, L=10)    # shape: (batch_size, fine_num, 60)
-    d_pe_fine = utils.positional_encoding(d_fine, L=4)   # shape: (batch_size, fine_num, 24)
-    
-    x_pe_fine = torch.cat([x_pe_coarse, x_pe_fine], dim=1)
-    d_pe_fine = torch.cat([d_pe_coarse, d_pe_fine], dim=1)
+    x_pe_fine = utils.positional_encoding(x_fine, L=10)    # shape: (batch_size, sample_num, 60)
+    d_pe_fine = utils.positional_encoding(d_fine, L=4)   # shape: (batch_size, sample_num, 24)
     
     # get density and color from model
     sigma_fine, rgb_fine = net_fine(x_pe_fine, d_pe_fine)
-    sigma_fine = sigma_fine.view((batch_size, fine_num + coarse_num, 1))
-    rgb_fine = rgb_fine.view((batch_size, fine_num + coarse_num, 3))
+    sigma_fine = sigma_fine.view((batch_size, sample_num, 1))
+    rgb_fine = rgb_fine.view((batch_size, sample_num, 3))
 
     # compute volume rendering
-    t_fine = torch.cat([t_coarse, t_fine], dim=1)
     fine_color, _ = utils.volume_rendering(t_fine, sigma_fine, rgb_fine)
 
     return coarse_color, fine_color
@@ -107,7 +113,7 @@ def train():
 
     # dataset
     dataset = datasets.DeepVoxels(is_train=True, is_ndc=False)
-    dataset_val = datasets.DeepVoxels(is_train=False, is_ndc=False)
+    dataset_val = datasets.DeepVoxels(is_train=True, is_ndc=False)
 
     # model
     net_coarse = Network()
@@ -118,48 +124,83 @@ def train():
     # optimizer
     params = list(net_coarse.parameters())
     params += list(net_fine.parameters())
-    optimizer = torch.optim.Adam(params, lr=learning_rate, weight_decay=weight_decay)
+    optimizer = torch.optim.Adam(params, lr=learning_rate)
 
     losses = []
+    loss_sum = 0
 
     # iteration
     iter = 0
     pbar = tqdm.tqdm(total=max_iter)
     while iter < max_iter:
         # batch rays from loader
-        #for idx, sample in enumerate(dataloader):
-        for i in range(batch_size):
-            sample = dataset.get_rays(batch_size)
-            o_batch = sample[0]["o"].to(device=device)
-            d_batch = sample[0]["d"].to(device=device)
-            gt_batch = sample[1].to(device=device)
+        for idx in range(dataset.img_num):
+            if iter % print_iter == 0:
+                validate(net_coarse, net_fine, batch_size, dataset_val, 0, iter)
+            o_batch, d_batch, gt_batch = dataset.get_ray_batchs(idx, batch_size)
+            o_batch = o_batch.to(device=device)
+            d_batch = d_batch.to(device=device)
+            gt_batch = gt_batch.to(device=device)
 
             coarse_color, fine_color = render(net_coarse, net_fine, o_batch, d_batch, batch_size)
+            if not torch.all(fine_color>=0) or torch.all(fine_color==0):
+                tqdm.tqdm.write("iter: {} fine_color neg or all_zero".format(iter))
 
             # compute loss
             optimizer.zero_grad()
-            loss = torch.sum(torch.square(torch.norm(coarse_color - gt_batch, p=2, dim=1)) + torch.square(torch.norm(fine_color - gt_batch, p=2, dim=1)))
-            
+            #loss = torch.sum(torch.square(torch.norm(coarse_color - gt_batch, p=2, dim=1)) + torch.square(torch.norm(fine_color - gt_batch, p=2, dim=1)))
+            loss = torch.sum(torch.square(torch.nn.functional.mse_loss(coarse_color, gt_batch)) + torch.square(torch.nn.functional.mse_loss(fine_color, gt_batch)))
+
             # backprop and optimizer step
             loss.backward()
             optimizer.step()
-            losses.append(loss.item() / batch_size)
+            #loss_sum += loss.item() / batch_size
+            loss_sum += loss.item()
 
             iter += 1
             pbar.update(1)
+        
             if iter >= max_iter:
                 break
 
             if iter % print_iter == 0:
                 torch.save(net_coarse, 'coarse_params.pt')
                 torch.save(net_fine, 'fine_params.pt')
-                tqdm.tqdm.write("iter: {:7d}    loss: {:5.3f}".format(iter, loss.item() / batch_size))
+                loss_avg = loss_sum / print_iter
+                losses.append(loss_avg)
+                tqdm.tqdm.write("iter: {:7d}    loss: {:5.3f}".format(iter, loss_avg))
+                loss_sum = 0
 
     pbar.close()
     plt.plot(losses)
     plt.savefig('loss_graph.png')
 
-    # validate model per some iterations
+def validate(net_coarse, net_fine, batch_size, dataset_val, val_img_idx, iter):
+    # model
+    batch_size = 1024
+    with torch.no_grad():
+        o_batchs, d_batchs = dataset_val.get_rays_val(val_img_idx, batch_size)
+        o_batchs, d_batchs = o_batchs.to(device=device), d_batchs.to(device=device)
+        rgb = []
+        for o_val, d_val in zip(o_batchs, d_batchs):
+            fine_color, _ = render(net_coarse, net_fine, o_val, d_val, batch_size)
+            rgb.append(fine_color)
+        rgb = torch.stack(rgb, dim=0)
+        rgb = rgb.view((dataset_val.W, dataset_val.H, 3)).permute(1, 0, 2)
+        img = rgb.detach().cpu().numpy()
+        img = to8b(img)
+        plt.imsave("val/iter{}.png".format(iter), img)
+
+
+def test():
+    dataset_val = datasets.DeepVoxels(is_train=True, is_ndc=False)
+
+    # model
+    net_coarse = torch.load('coarse_params.pt')
+    net_coarse = net_coarse.to(device=device, dtype=torch.float32)
+    net_fine = torch.load('fine_params.pt')
+    net_fine = net_fine.to(device=device, dtype=torch.float32)
+    batch_size = 1024
     with torch.no_grad():
         rgbs = []
         for idx in tqdm.tqdm(range(dataset_val.img_num)):
@@ -167,7 +208,7 @@ def train():
             o_batchs, d_batchs = o_batchs.to(device=device), d_batchs.to(device=device)
             rgb = []
             for o_val, d_val in zip(o_batchs, d_batchs):
-                _, fine_color = render(net_coarse, net_fine, o_val, d_val, batch_size)
+                fine_color, _ = render(net_coarse, net_fine, o_val, d_val, batch_size)
                 rgb.append(fine_color)
             rgb = torch.stack(rgb, dim=0).view((dataset_val.W, dataset_val.H, 3)).permute(1, 0, 2)
             rgb = rgb.detach().cpu().numpy()
@@ -177,3 +218,4 @@ def train():
 
 
 train()
+test()
