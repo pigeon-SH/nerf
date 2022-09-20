@@ -14,12 +14,13 @@ def positional_encoding(x, L=10):
     twos = torch.pow(twos, exp)
     encoded = torch.multiply(twos, pi)
 
-    x = torch.repeat_interleave(x, repeats=L, dim=-1)
+    xx = torch.repeat_interleave(x, repeats=L, dim=-1)
     encoded = torch.repeat_interleave(encoded, repeats=3, dim=-1)
 
-    pe = torch.repeat_interleave(x, repeats=2, dim=-1)
-    pe[:, :, ::2] = torch.sin(encoded * x)
-    pe[:, :, 1::2] = torch.cos(encoded * x)
+    pe = torch.repeat_interleave(xx, repeats=2, dim=-1)
+    pe[:, :, ::2] = torch.sin(encoded * xx)
+    pe[:, :, 1::2] = torch.cos(encoded * xx)
+    pe = torch.cat([x, pe], dim=-1)
     return pe
 
 def dist(x1, x2):
@@ -37,5 +38,3 @@ def volume_rendering(t, sigma, rgb):
     weights = T * (1. - torch.exp(-delta * sigma))  # shape: (batch_size, sample_num, 1)
     C = torch.sum(weights.clone() * rgb.clone(), dim=1) # shape: (batch_size, 3)
     return C, weights
-
-

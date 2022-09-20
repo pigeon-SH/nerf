@@ -5,6 +5,7 @@ import cv2
 from skimage import transform
 import torch
 import random
+import json
 
 import utils
 from mpl_toolkits.mplot3d import Axes3D 
@@ -65,7 +66,8 @@ class DeepVoxels():
         
             xs = torch.arange(0, self.W).to(device=device, dtype=torch.float32)
             ys = torch.arange(0, self.H).to(device=device, dtype=torch.float32)
-            xs, ys = torch.meshgrid(ys, xs)   # default indexing='ij' for pytorch version 1.7
+            xs, ys = torch.meshgrid(xs, ys)   # default indexing='ij' for pytorch version 1.7
+            #xs, ys = xs.T, ys.T
             pixels = torch.stack([xs, ys, torch.ones_like(xs)], dim=-1).view((self.W, self.H, 3, 1))    # shape: (W, H, 3, 1)
             d_cam = torch.matmul(self.K_inv, pixels)    # shape: (W, H, 3, 1)
             d_cam = torch.cat([d_cam[:, :, 0:1], -d_cam[:, :, 1:2], -torch.ones_like(d_cam[:, :, 0:1])], dim=2) # shape: (W, H, 3, 1)
@@ -135,5 +137,73 @@ class DeepVoxels():
         return o_batch, d_batch, gt_batch
 
 
+class Lego():
+    def __init__(self, split):
+        self.root = "../datasets/nerf_synthetic/lego"
+        self.pose_fpath = os.path.join(self.root, 'transforms_{}.json'.format(split))
+        self.img_fpaths = sorted(glob(os.path.join(self.root, split, '*.png')))
+        self.img_num = len(self.img_fpaths)
+        
+        with open(self.pose_fpath, 'r') as fp:
+            metas = json.load(fp)
+        
+        self.o_total = []
+        self.d_total = []
+        self.gt_total = []
 
+        camera_angle_x = metas['camera_angle_x']
+        self.H, self.W = cv2.imread(self.img_fpaths[0]).shape[:2]
+        focal = .5 * self.W / np.tan(5 * camera_angle_x)
 
+        for idx, frame in enumerate(metas['frames']):
+            tf_matrix = torch.tensor(frame['transform_matrix'])
+            o = tf_matrix[:3, 3]
+            self.o_total.append(o)
+
+            gt = torch.tensor(cv2.imread(self.img_fpaths[idx]))
+            self.gt_total.append(gt)
+
+            xs = torch.arange(0, self.W)
+            ys = torch.arange(0, self.H)
+            i, j = torch.meshgrid(xs, ys)
+            dirs = torch.stack([(i-self.W*.5)/focal, -(j-self.H*.5)/focal, -torch.ones_like(i)], -1)
+            dirs = torch.matmul(dirs, tf_matrix[:3, :3])
+            self.d_total.append(dirs)
+        
+        self.o_total = torch.stack(self.o_total, dim=0)   # shape: (img_num, 3)
+        self.d_total = torch.stack(self.d_total, dim=0)   # shape: (img_num, H, W, 3)
+        self.gt_total = torch.stack(self.gt_total, dim=0) # shape: (img_num, H, W, 3)
+        self.gt_total = self.gt_total / 255.
+    
+    def get_rays_val(self, idx, batch_size):
+        d_f = torch.flatten(self.d_total[idx], 0, 1)    # shape: (W*H, 3)
+        i = 0
+        d_batchs = []
+        while (i+1)*batch_size < self.W * self.H:
+            start = i * batch_size
+            end = (i+1) * batch_size 
+            d = d_f[start:end, :]
+            d_batchs.append(d)
+            i += 1
+        d = d_f[start:end, :]
+        d_batchs.append(d)
+        d_batchs = torch.stack(d_batchs, 0) # shape: (num, batch_size, 3) where (num*batch_size)=W*H
+
+        o_batch = self.o_total[idx:idx+1]   # shape: (1, 3)
+        o_batch = torch.repeat_interleave(o_batch.view((1, 1, 3)), batch_size, dim=1)   # shape: (1, batch_size, 3)
+        o_batchs = torch.repeat_interleave(o_batch, len(d_batchs), dim=0) # shape: (num, batch_size, 3) where (num*batch_size)=W*H
+
+        return o_batchs, d_batchs
+    
+    def get_ray_batchs(self, idx, batch_size):
+        o_batch = self.o_total[idx:idx+1]   # shape: (1, 3)
+        o_batch = torch.repeat_interleave(o_batch, batch_size, dim=0)   # shape: (batch_size, 3)
+        pixel_idxs = torch.randint(0, self.W * self.H, (batch_size,))
+        d_f = torch.flatten(self.d_total[idx], 0, 1)    # shape: (W*H, 3)
+        d_batch = d_f[pixel_idxs, :]
+        gt_f = torch.flatten(self.gt_total[idx], 0, 1)    # shape: (W*H, 3)
+        gt_batch = gt_f[pixel_idxs, :]
+        return o_batch, d_batch, gt_batch
+    
+    def __len__(self):
+        return self.img_num

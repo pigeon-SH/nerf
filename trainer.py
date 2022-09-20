@@ -1,8 +1,3 @@
-"""
-220818 problem
-아마 validate 결과 이미지 값이 0~1로 기대되는데 -값을 가지는 것 같음 아니면 1 초과던가
-"""
-
 import os
 import torch
 import random
@@ -22,8 +17,9 @@ import imageio
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # from nerf-pytorch
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
+VAL_DIR = 'val0'
 
-def render(net_coarse, net_fine, o_batch, d_batch, batch_size):
+def render(net_coarse, net_fine, o_batch, d_batch, batch_size, is_noise):
     # hyperparameters
     near = 0.
     far = 1.
@@ -45,7 +41,7 @@ def render(net_coarse, net_fine, o_batch, d_batch, batch_size):
     d_pe_coarse = utils.positional_encoding(d_coarse, L=4)  # shape: (batch_size, coarse_num, 24)
 
     # get density and color from model
-    sigma_coarse, rgb_coarse = net_coarse(x_pe_coarse, d_pe_coarse)
+    sigma_coarse, rgb_coarse = net_coarse(x_pe_coarse, d_pe_coarse, is_noise=is_noise)
     sigma_coarse = sigma_coarse.view((batch_size, coarse_num, 1))
     rgb_coarse = rgb_coarse.view((batch_size, coarse_num, 3))
     
@@ -91,7 +87,7 @@ def render(net_coarse, net_fine, o_batch, d_batch, batch_size):
     d_pe_fine = utils.positional_encoding(d_fine, L=4)   # shape: (batch_size, sample_num, 24)
     
     # get density and color from model
-    sigma_fine, rgb_fine = net_fine(x_pe_fine, d_pe_fine)
+    sigma_fine, rgb_fine = net_fine(x_pe_fine, d_pe_fine, is_noise=is_noise)
     sigma_fine = sigma_fine.view((batch_size, sample_num, 1))
     rgb_fine = rgb_fine.view((batch_size, sample_num, 3))
 
@@ -102,18 +98,19 @@ def render(net_coarse, net_fine, o_batch, d_batch, batch_size):
 
 
 def train():
-    if not os.path.exists("val"):
-        os.makedirs("val")
+    if not os.path.exists(VAL_DIR):
+        os.makedirs(VAL_DIR)
     # hyperparameters
     batch_size = 1024
     learning_rate = 5 * 1e-4
-    weight_decay = 5 * 1e-5
+    min_learning_rate = 5 * 1e-5
     max_iter = 200000
     print_iter = 100
+    val_iter = 500
 
     # dataset
-    dataset = datasets.DeepVoxels(is_train=True, is_ndc=False)
-    dataset_val = datasets.DeepVoxels(is_train=True, is_ndc=False)
+    dataset = datasets.Lego(split="train")
+    dataset_val = datasets.Lego(split="val")
 
     # model
     net_coarse = Network()
@@ -130,50 +127,51 @@ def train():
     loss_sum = 0
 
     # iteration
-    iter = 0
+    iters = 0
     pbar = tqdm.tqdm(total=max_iter)
-    while iter < max_iter:
+    while iters < max_iter:
+        if iters % val_iter == 0:
+            validate(net_coarse, net_fine, batch_size, dataset_val, 0, iters)
+
         # batch rays from loader
-        for idx in range(dataset.img_num):
-            if iter % print_iter == 0:
-                validate(net_coarse, net_fine, batch_size, dataset_val, 0, iter)
-            o_batch, d_batch, gt_batch = dataset.get_ray_batchs(idx, batch_size)
-            o_batch = o_batch.to(device=device)
-            d_batch = d_batch.to(device=device)
-            gt_batch = gt_batch.to(device=device)
+        idx = np.random.randint(dataset.img_num)        
+        o_batch, d_batch, gt_batch = dataset.get_ray_batchs(idx, batch_size)
+        o_batch = o_batch.to(device=device)
+        d_batch = d_batch.to(device=device)
+        gt_batch = gt_batch.to(device=device)
 
-            coarse_color, fine_color = render(net_coarse, net_fine, o_batch, d_batch, batch_size)
-            if not torch.all(fine_color>=0) or torch.all(fine_color==0):
-                tqdm.tqdm.write("iter: {} fine_color neg or all_zero".format(iter))
+        coarse_color, fine_color = render(net_coarse, net_fine, o_batch, d_batch, batch_size, True)
+        if not torch.all(fine_color>=0) or torch.all(fine_color==0):
+            tqdm.tqdm.write("iter: {} fine_color neg or all_zero".format(iters))
 
-            # compute loss
-            optimizer.zero_grad()
-            #loss = torch.sum(torch.square(torch.norm(coarse_color - gt_batch, p=2, dim=1)) + torch.square(torch.norm(fine_color - gt_batch, p=2, dim=1)))
-            loss = torch.sum(torch.square(torch.nn.functional.mse_loss(coarse_color, gt_batch)) + torch.square(torch.nn.functional.mse_loss(fine_color, gt_batch)))
+        # compute loss
+        optimizer.zero_grad()
+        #loss = torch.sum(torch.square(torch.norm(coarse_color - gt_batch, p=2, dim=1)) + torch.square(torch.norm(fine_color - gt_batch, p=2, dim=1)))
+        loss = torch.mean(torch.square(coarse_color - gt_batch)) + torch.mean(torch.square(fine_color - gt_batch))
 
-            # backprop and optimizer step
-            loss.backward()
-            optimizer.step()
-            #loss_sum += loss.item() / batch_size
-            loss_sum += loss.item()
+        # backprop and optimizer step
+        loss.backward()
+        optimizer.step()
+        #loss_sum += loss.item() / batch_size
+        loss_sum += loss.item()
 
-            iter += 1
-            pbar.update(1)
+        iters += 1
+        pbar.update(1)
         
-            if iter >= max_iter:
-                break
+        if iters >= max_iter:
+            break
 
-            if iter % print_iter == 0:
-                torch.save(net_coarse, 'coarse_params.pt')
-                torch.save(net_fine, 'fine_params.pt')
-                loss_avg = loss_sum / print_iter
-                losses.append(loss_avg)
-                tqdm.tqdm.write("iter: {:7d}    loss: {:5.3f}".format(iter, loss_avg))
-                loss_sum = 0
+        if iters % print_iter == 0:
+            torch.save(net_coarse, VAL_DIR + '/coarse_params.pt')
+            torch.save(net_fine, VAL_DIR + '/fine_params.pt')
+            loss_avg = loss_sum / print_iter
+            losses.append(loss_avg)
+            tqdm.tqdm.write("iter: {:7d}    loss: {:5.3f}".format(iters, loss_avg))
+            loss_sum = 0
 
     pbar.close()
     plt.plot(losses)
-    plt.savefig('loss_graph.png')
+    plt.savefig(VAL_DIR + '/loss_graph.png')
 
 def validate(net_coarse, net_fine, batch_size, dataset_val, val_img_idx, iter):
     # model
@@ -183,22 +181,22 @@ def validate(net_coarse, net_fine, batch_size, dataset_val, val_img_idx, iter):
         o_batchs, d_batchs = o_batchs.to(device=device), d_batchs.to(device=device)
         rgb = []
         for o_val, d_val in zip(o_batchs, d_batchs):
-            fine_color, _ = render(net_coarse, net_fine, o_val, d_val, batch_size)
+            fine_color, _ = render(net_coarse, net_fine, o_val, d_val, batch_size, False)
             rgb.append(fine_color)
         rgb = torch.stack(rgb, dim=0)
-        rgb = rgb.view((dataset_val.W, dataset_val.H, 3)).permute(1, 0, 2)
+        rgb = rgb.view((dataset_val.W, dataset_val.H, 3))
         img = rgb.detach().cpu().numpy()
         img = to8b(img)
-        plt.imsave("val/iter{}.png".format(iter), img)
+        plt.imsave(VAL_DIR + "/iter{}.png".format(iter), img)
 
 
 def test():
-    dataset_val = datasets.DeepVoxels(is_train=True, is_ndc=False)
+    dataset_val = datasets.Lego(split="test")
 
     # model
-    net_coarse = torch.load('coarse_params.pt')
+    net_coarse = torch.load(VAL_DIR + '/coarse_params.pt')
     net_coarse = net_coarse.to(device=device, dtype=torch.float32)
-    net_fine = torch.load('fine_params.pt')
+    net_fine = torch.load(VAL_DIR + '/fine_params.pt')
     net_fine = net_fine.to(device=device, dtype=torch.float32)
     batch_size = 1024
     with torch.no_grad():
@@ -210,10 +208,10 @@ def test():
             for o_val, d_val in zip(o_batchs, d_batchs):
                 fine_color, _ = render(net_coarse, net_fine, o_val, d_val, batch_size)
                 rgb.append(fine_color)
-            rgb = torch.stack(rgb, dim=0).view((dataset_val.W, dataset_val.H, 3)).permute(1, 0, 2)
+            rgb = torch.stack(rgb, dim=0).view((dataset_val.W, dataset_val.H, 3))
             rgb = rgb.detach().cpu().numpy()
             rgbs.append(rgb)
-        movie_path = os.path.join("val", "val_rgb.mp4")
+        movie_path = os.path.join(VAL_DIR, "val_rgb.mp4")
         imageio.mimwrite(movie_path, to8b(rgbs), fps=30, quality=8)
 
 
